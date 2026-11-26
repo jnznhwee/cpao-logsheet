@@ -4203,39 +4203,57 @@ function getSelectedPreparedBySignatory() {
     return officers[idx] || officers[0];
 }
 
-function buildPortalDistributionChartsHtml(portalStatusRows, totalReceived) {
+function getSavedPortalsList() {
+    const saved = [];
+    (AppState.settings?.platforms || []).forEach(p => {
+        const rawName = typeof p === 'string' ? p : (p && p.name);
+        const cleanName = String(rawName || '').trim().toUpperCase();
+        if (cleanName && isValidPortalColumnName(cleanName) && !saved.includes(cleanName)) {
+            saved.push(cleanName);
+        }
+    });
+    return saved;
+}
+
+function buildPortalDistributionChartsHtml(portalStatusRows) {
     const palette = ["#1d4ed8", "#0d9488", "#d97706", "#059669", "#4f46e5", "#0284c7", "#b45309", "#0f766e", "#2563eb", "#475569"];
-    const activeRows = (portalStatusRows || []).filter(r => r.ack > 0);
-    if (!activeRows.length || totalReceived <= 0) {
-        return `<p class="text-xs text-slate-500 italic py-3">No portal distribution data available for the selected filters.</p>`;
+    const savedSet = new Set(getSavedPortalsList());
+    const savedPortalRows = (portalStatusRows || []).filter(r => savedSet.has(String(r.portal || '').trim().toUpperCase()));
+    const totalSavedPortalCount = savedPortalRows.reduce((sum, r) => sum + (Number(r.ack) || 0), 0);
+    const activeRows = savedPortalRows.filter(r => (Number(r.ack) || 0) > 0);
+
+    if (!activeRows.length || totalSavedPortalCount <= 0) {
+        return `<p class="text-xs text-slate-500 italic py-3">No saved portal distribution data available for the selected filters.</p>`;
     }
 
     let deg = 0;
     const pieSegments = activeRows.map((r, i) => {
-        const pct = (r.ack / totalReceived) * 100;
+        const ackVal = Number(r.ack) || 0;
+        const pct = (ackVal / totalSavedPortalCount) * 100;
         const nextDeg = i === activeRows.length - 1 ? 360 : deg + (pct / 100) * 360;
         const color = palette[i % palette.length];
         const seg = `${color} ${deg.toFixed(2)}deg ${nextDeg.toFixed(2)}deg`;
         deg = nextDeg;
         return {
             portal: r.portal,
-            ack: r.ack,
+            ack: ackVal,
             pct: pct.toFixed(1),
             color,
             seg
         };
     });
 
-    const maxAck = Math.max(1, ...activeRows.map(r => r.ack));
+    const maxAck = Math.max(1, ...activeRows.map(r => Number(r.ack) || 0));
     const barRowsHtml = activeRows.map((r, i) => {
-        const widthPct = ((r.ack / maxAck) * 100).toFixed(1);
-        const sharePct = totalReceived > 0 ? ((r.ack / totalReceived) * 100).toFixed(1) : "0.0";
+        const ackVal = Number(r.ack) || 0;
+        const widthPct = ((ackVal / maxAck) * 100).toFixed(1);
+        const sharePct = totalSavedPortalCount > 0 ? ((ackVal / totalSavedPortalCount) * 100).toFixed(1) : "0.0";
         const color = palette[i % palette.length];
         return `
             <div class="report-bar-row">
                 <div class="report-bar-label">${escapeHtml(r.portal)}</div>
                 <div class="report-bar-track"><div class="report-bar-fill" style="width:${widthPct}%;background:${color};"></div></div>
-                <div class="report-bar-value">${r.ack} (${sharePct}%)</div>
+                <div class="report-bar-value">${ackVal} (${sharePct}%)</div>
             </div>
         `;
     }).join("");
@@ -4254,7 +4272,7 @@ function buildPortalDistributionChartsHtml(portalStatusRows, totalReceived) {
         <div class="grid grid-cols-1 md:grid-cols-12 gap-4 items-center">
             <div class="md:col-span-5 flex flex-col items-center justify-center py-2">
                 <div style="width:160px;height:160px;border-radius:9999px;background:conic-gradient(${pieSegments.map(s => s.seg).join(", ")});border:2px solid #cbd5e1;box-shadow:0 4px 12px rgba(15,23,42,0.08);"></div>
-                <span class="text-[10px] font-bold uppercase tracking-wider text-slate-500 mt-2">Portal Share (${totalReceived} total)</span>
+                <span class="text-[10px] font-bold uppercase tracking-wider text-slate-500 mt-2">Saved Portals Share (${totalSavedPortalCount} total)</span>
             </div>
             <div class="md:col-span-7 space-y-3">
                 <div class="space-y-0.5">${pieLegendHtml}</div>
@@ -4323,15 +4341,7 @@ function generateReport() {
     const pendingCount = totalReceived - resolvedCount;
     const overallEfficiency = totalReceived > 0 ? ((resolvedCount / totalReceived) * 100).toFixed(1) : "0.0";
 
-    const portalSet = [];
-    (AppState.settings.platforms || []).forEach(p => {
-        const name = String(typeof p === 'string' ? p : p.name).trim().toUpperCase();
-        if (isValidPortalColumnName(name) && !portalSet.includes(name)) portalSet.push(name);
-    });
-    filtered.forEach(t => {
-        const p = String(t.platform || '').trim().toUpperCase();
-        if (isValidPortalColumnName(p) && !portalSet.includes(p)) portalSet.push(p);
-    });
+    const portalSet = getSavedPortalsList();
 
     // 1. Top 10 concerns / issues + bar & pie distribution (Concern Category only, excluding TYPE OF TICKET)
     const concernCounts = {};
@@ -4373,8 +4383,8 @@ function generateReport() {
         }).join('')
         : `<p class="text-xs text-slate-500 italic">No Top 10 bar data in this period.</p>`;
 
-    // 2. Full list of ALL concern categories + raw tally per portal (Portals only, no ticket numbers)
-    const cleanPortalsOnly = [...portalSet];
+    // 2. Full list of ALL concern categories + tally per SAVED PORTAL only (Landscape paginated across pages)
+    const savedPortalsOnly = getSavedPortalsList();
 
     const allConcernNamesSet = new Set();
     CATEGORY_GROUPS.forEach(grp => {
@@ -4394,16 +4404,19 @@ function generateReport() {
         return cB - cA || a.localeCompare(b);
     });
 
-    const portalHeaderCellsHtml = cleanPortalsOnly.map(p => `<th class="text-center">${escapeHtml(p)}</th>`).join('');
+    const portalHeaderCellsHtml = savedPortalsOnly.length > 0
+        ? savedPortalsOnly.map(p => `<th class="text-center">${escapeHtml(p)}</th>`).join('')
+        : `<th class="text-center text-slate-400">NO SAVED PORTALS</th>`;
+
     const allConcernsPortalTotals = {};
-    cleanPortalsOnly.forEach(p => { allConcernsPortalTotals[p] = 0; });
+    savedPortalsOnly.forEach(p => { allConcernsPortalTotals[p] = 0; });
     let allConcernsGrandTotal = 0;
 
-    const allConcernsMasterRowsHtml = allConcernsList.length > 0
-        ? allConcernsList.map((catName, idx) => {
-            const grpName = getGroupForCategory(catName);
-            let rowTotal = 0;
-            const cellsHtml = cleanPortalsOnly.map(pName => {
+    const preparedConcernRows = allConcernsList.map((catName, idx) => {
+        const grpName = getGroupForCategory(catName);
+        let rowTotal = 0;
+        const cellsHtml = savedPortalsOnly.length > 0
+            ? savedPortalsOnly.map(pName => {
                 const cnt = filtered.filter(t => {
                     const tCat = String(t.category || '').trim();
                     const tPlat = String(t.platform || '').trim().toUpperCase();
@@ -4412,60 +4425,110 @@ function generateReport() {
                 rowTotal += cnt;
                 allConcernsPortalTotals[pName] += cnt;
                 return `<td class="text-center font-mono ${cnt > 0 ? 'font-bold text-slate-900' : 'text-slate-400'}">${cnt}</td>`;
-            }).join('');
-            allConcernsGrandTotal += rowTotal;
-            return `
-                <tr>
-                    <td class="font-mono text-center text-slate-600">${idx + 1}</td>
-                    <td class="text-slate-600 font-medium">${escapeHtml(grpName)}</td>
-                    <td class="font-semibold text-slate-900">${escapeHtml(catName)}</td>
-                    ${cellsHtml}
-                    <td class="text-center font-mono font-extrabold text-blue-900">${rowTotal}</td>
-                </tr>
-            `;
-        }).join('') + `
-            <tr class="report-total-row">
-                <td colspan="3">TOTAL ALL CONCERNS TALLY PER PORTAL</td>
-                ${cleanPortalsOnly.map(p => `<td class="text-center font-mono">${allConcernsPortalTotals[p] || 0}</td>`).join('')}
-                <td class="text-center font-mono">${allConcernsGrandTotal}</td>
+            }).join('')
+            : `<td class="text-center font-mono text-slate-400">0</td>`;
+        allConcernsGrandTotal += rowTotal;
+        return `
+            <tr>
+                <td class="font-mono text-center text-slate-600">${idx + 1}</td>
+                <td class="text-slate-600 font-medium">${escapeHtml(grpName)}</td>
+                <td class="font-semibold text-slate-900">${escapeHtml(catName)}</td>
+                ${cellsHtml}
+                <td class="text-center font-mono font-extrabold text-blue-900">${rowTotal}</td>
             </tr>
-        `
-        : `<tr><td colspan="${cleanPortalsOnly.length + 4}" class="text-center text-slate-500 italic">No concern categories available.</td></tr>`;
+        `;
+    });
 
-    // 3. Summary per portal: ACKNOWLEDGED, RESOLVED, PENDING, RESPONSE RATE (%)
+    const masterTotalRowHtml = `
+        <tr class="report-total-row">
+            <td colspan="3">TOTAL ALL CONCERNS TALLY PER SAVED PORTAL</td>
+            ${savedPortalsOnly.length > 0
+                ? savedPortalsOnly.map(p => `<td class="text-center font-mono">${allConcernsPortalTotals[p] || 0}</td>`).join('')
+                : `<td class="text-center font-mono">0</td>`}
+            <td class="text-center font-mono">${allConcernsGrandTotal}</td>
+        </tr>
+    `;
+
+    const MASTER_ROWS_PER_LANDSCAPE_PAGE = 14;
+    const masterChunks = [];
+    if (preparedConcernRows.length === 0) {
+        masterChunks.push({ rowsHtml: `<tr><td colspan="${Math.max(1, savedPortalsOnly.length) + 4}" class="text-center text-slate-500 italic">No concern categories available.</td></tr>`, isLast: true });
+    } else {
+        for (let i = 0; i < preparedConcernRows.length; i += MASTER_ROWS_PER_LANDSCAPE_PAGE) {
+            const slice = preparedConcernRows.slice(i, i + MASTER_ROWS_PER_LANDSCAPE_PAGE);
+            const isLast = (i + MASTER_ROWS_PER_LANDSCAPE_PAGE) >= preparedConcernRows.length;
+            masterChunks.push({
+                rowsHtml: slice.join('') + (isLast ? masterTotalRowHtml : ''),
+                isLast
+            });
+        }
+    }
+
+    const masterLandscapePagesHtml = masterChunks.map((chunk, chunkIdx) => {
+        const pageLabel = masterChunks.length > 1
+            ? `MASTER LIST OF ALL CONCERNS & TALLY PER PORTAL (LANDSCAPE — PAGE ${chunkIdx + 1} OF ${masterChunks.length})`
+            : `MASTER LIST OF ALL CONCERNS & TALLY PER PORTAL (LANDSCAPE)`;
+        const breakClass = chunkIdx > 0 ? 'report-page-break' : '';
+        return `
+            <div class="report-a4-page report-landscape-page ${breakClass} space-y-2">
+                <div class="flex items-center justify-between border-b border-slate-300 pb-1.5">
+                    <h4 class="report-chart-title" style="margin:0;">${escapeHtml(pageLabel)}</h4>
+                    <span class="text-[10px] font-mono font-bold uppercase text-slate-600">Landscape View • Saved Portals Only</span>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="report-summary-table">
+                        <thead>
+                            <tr>
+                                <th class="w-12 text-center">#</th>
+                                <th>${escapeHtml(rc.colCatGroup)}</th>
+                                <th>${escapeHtml(rc.colCatName)}</th>
+                                ${portalHeaderCellsHtml}
+                                <th class="text-center">${escapeHtml(rc.colCatTotal)}</th>
+                            </tr>
+                        </thead>
+                        <tbody>${chunk.rowsHtml}</tbody>
+                    </table>
+                </div>
+            </div>
+        `;
+    }).join('');
+
+    // 3. Summary per SAVED PORTAL only: ACKNOWLEDGED, RESOLVED, PENDING, RESPONSE RATE (%)
     let totalAck = 0;
     let totalRes = 0;
     let totalPend = 0;
     const portalStatusSummaryData = [];
 
-    const portalStatusRowsHtml = portalSet.map(pName => {
-        const pTickets = filtered.filter(t => String(t.platform || '').trim().toUpperCase() === pName);
-        const ack = pTickets.length;
-        const res = pTickets.filter(t => String(t.status || '').trim().toLowerCase() === 'closed').length;
-        const pend = ack - res;
-        const rate = ack > 0 ? ((res / ack) * 100).toFixed(1) : "0.0";
-        totalAck += ack;
-        totalRes += res;
-        totalPend += pend;
-        portalStatusSummaryData.push({ portal: pName, ack, res, pend, rate });
-        return `
-            <tr>
-                <td class="font-bold text-slate-900">${escapeHtml(pName)}</td>
-                <td class="text-center font-mono font-bold">${ack}</td>
-                <td class="text-center font-mono font-bold text-emerald-800">${res}</td>
-                <td class="text-center font-mono font-bold text-rose-700">${pend}</td>
-                <td class="text-center font-mono font-extrabold text-blue-900">${rate}%</td>
+    const portalStatusRowsHtml = savedPortalsOnly.length > 0
+        ? savedPortalsOnly.map(pName => {
+            const pTickets = filtered.filter(t => String(t.platform || '').trim().toUpperCase() === pName);
+            const ack = pTickets.length;
+            const res = pTickets.filter(t => String(t.status || '').trim().toLowerCase() === 'closed').length;
+            const pend = ack - res;
+            const rate = ack > 0 ? ((res / ack) * 100).toFixed(1) : "0.0";
+            totalAck += ack;
+            totalRes += res;
+            totalPend += pend;
+            portalStatusSummaryData.push({ portal: pName, ack, res, pend, rate });
+            return `
+                <tr>
+                    <td class="font-bold text-slate-900">${escapeHtml(pName)}</td>
+                    <td class="text-center font-mono font-bold">${ack}</td>
+                    <td class="text-center font-mono font-bold text-emerald-800">${res}</td>
+                    <td class="text-center font-mono font-bold text-rose-700">${pend}</td>
+                    <td class="text-center font-mono font-extrabold text-blue-900">${rate}%</td>
+                </tr>
+            `;
+        }).join('') + `
+            <tr class="report-total-row">
+                <td>TOTAL (SAVED PORTALS)</td>
+                <td class="text-center font-mono">${totalAck}</td>
+                <td class="text-center font-mono">${totalRes}</td>
+                <td class="text-center font-mono">${totalPend}</td>
+                <td class="text-center font-mono">${totalAck > 0 ? ((totalRes / totalAck) * 100).toFixed(1) : "0.0"}%</td>
             </tr>
-        `;
-    }).join('') + `
-        <tr class="report-total-row">
-            <td>TOTAL</td>
-            <td class="text-center font-mono">${totalAck}</td>
-            <td class="text-center font-mono">${totalRes}</td>
-            <td class="text-center font-mono">${totalPend}</td>
-            <td class="text-center font-mono">${totalAck > 0 ? ((totalRes / totalAck) * 100).toFixed(1) : "0.0"}%</td>
-        </tr>
-    `;
+        `
+        : `<tr><td colspan="5" class="text-center text-slate-500 italic">No saved portals configured.</td></tr>`;
 
     // 4. Endorsed concerns per region: Endorsed, Pending, Resolved, Resolution Rate (%)
     const regMap = {};
@@ -4534,7 +4597,7 @@ function generateReport() {
     const cfg = AppState.settings.reportConfig || {};
     const headerHtml = buildReportPageHeaderHtml(cfg, startISO, endISO, overallEfficiency, resolvedCount, totalReceived, cfg.title || "EXECUTIVE RESOLUTION & PORTAL PERFORMANCE REPORT");
     const pieHtml = buildPortalCategoryPieChartHtml(top10Concerns, totalReceived);
-    const portalChartsHtml = buildPortalDistributionChartsHtml(portalStatusSummaryData, totalReceived);
+    const portalChartsHtml = buildPortalDistributionChartsHtml(portalStatusSummaryData);
 
     const docEl = document.getElementById('printableReportDocument');
     if (!docEl) return;
@@ -4587,24 +4650,8 @@ function generateReport() {
             </div>
         </div>
 
-        <!-- 2. FULL LIST OF ALL CONCERNS & TALLY PER PORTAL -->
-        <div class="report-chart-card space-y-2">
-            <h4 class="report-chart-title">MASTER LIST OF ALL CONCERNS &amp; TALLY PER PORTAL</h4>
-            <div class="overflow-x-auto">
-                <table class="report-summary-table">
-                    <thead>
-                        <tr>
-                            <th class="w-12 text-center">#</th>
-                            <th>${escapeHtml(rc.colCatGroup)}</th>
-                            <th>${escapeHtml(rc.colCatName)}</th>
-                            ${portalHeaderCellsHtml}
-                            <th class="text-center">${escapeHtml(rc.colCatTotal)}</th>
-                        </tr>
-                    </thead>
-                    <tbody>${allConcernsMasterRowsHtml}</tbody>
-                </table>
-            </div>
-        </div>
+        <!-- 2. MASTER LIST OF ALL CONCERNS & TALLY PER SAVED PORTAL (LANDSCAPE PAGINATED) -->
+        ${masterLandscapePagesHtml}
 
         <!-- 3. PORTAL STATUS SUMMARY & PIE / BAR CHARTS -->
         <div class="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
